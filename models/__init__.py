@@ -13,6 +13,7 @@ from models.schemas import (
     ExtractedFactItem,
     ExtractedFactsList,
     FactRelationship,
+    LLMRelationshipEvaluation,
     FactType,
     RelationshipType,
 )
@@ -25,6 +26,7 @@ __all__ = [
     "ExtractedFactItem",
     "ExtractedFactsList",
     "FactRelationship",
+    "LLMRelationshipEvaluation",
     "FactType",
     "RelationshipType",
 ]

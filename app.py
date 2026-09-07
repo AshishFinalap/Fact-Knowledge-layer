@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).parent.resolve()))
 from database.database import Database
 from services.pdf_service import PDFService
 from services.fact_extractor import FactExtractor
+from services.normalizer import Normalizer
 from services.relationship_engine import RelationshipEngine
 
 # Load environment variables
@@ -39,6 +40,7 @@ st.set_page_config(
 db_path = os.getenv("DATABASE_PATH", "data/fact_knowledge.db")
 db = Database(db_path=db_path)
 fact_extractor = FactExtractor()
+relationship_engine = RelationshipEngine()
 
 
 def render_sidebar():
@@ -339,7 +341,7 @@ class Fact(BaseModel):
                 "Confidence": f.get("confidence", 1.0),
                 "Evidence Quote": f["evidence_quote"],
             })
-        st.dataframe(display_rows, use_container_width=True)
+        st.dataframe(display_rows, width="stretch")
     else:
         # Card View with detailed grounding
         for f in filtered_facts:
@@ -379,42 +381,206 @@ class Fact(BaseModel):
 
 
 def render_relationships_tab():
-    """Explains and previews the cross-document fact relationship engine."""
+    """Explains and inspects cross-document fact relationships (CORROBORATES, CONTRADICTS, RECONCILES)."""
     st.header("⚖️ Cross-Document Fact Relationships")
     st.write(
-        "The system discovers, compares, and explains relationships between facts across "
-        "different documents, categorizing them into three primary relationship types:"
+        "Discovers, compares, and explains relationships between facts across different documents, "
+        "using deterministic normalizers and Gemini reasoning for ambiguous cases."
     )
 
     col1, col2, col3 = st.columns(3)
     with col1:
         st.success("#### 1. CORROBORATES")
-        st.write(
-            "The same fact is asserted across multiple documents, even if expressed with different phrasing."
-        )
-        st.caption("*Example: 'Headcount reached 500' vs '500 active employees on payroll'.*")
+        st.caption("Same fact confirmed across documents, even if expressed with different wording.")
 
     with col2:
         st.error("#### 2. CONTRADICTS")
-        st.write(
-            "Genuine conflict between facts sharing the same subject, predicate, and temporal/scope context."
-        )
-        st.caption("*Example: 'Operating profit was $10M' vs 'Operating profit was $2M' for the same period.*")
+        st.caption("Direct conflict under identical subject, predicate, timeframe, and scope.")
 
     with col3:
         st.warning("#### 3. RECONCILES")
-        st.write(
-            "Facts appear contradictory at first glance, but are reconciled by examining contextual dimensions (time period, scope, units)."
-        )
-        st.caption("*Example: Differing revenue numbers explained by FY22 vs FY23 periods.*")
+        st.caption("Differences resolved by context: time periods, reporting scopes, or measurement units.")
 
     st.divider()
-    relationships = db.get_relationships()
-    if not relationships:
+
+    # Trigger Relationship Analysis Across Documents
+    all_facts = db.get_fact_models()
+    docs = db.get_documents()
+
+    if len(docs) < 2:
+        st.info("ℹ️ Upload and extract at least two different documents to discover cross-document relationships.")
+    btn_col1, btn_col2 = st.columns([3, 1])
+    with btn_col1:
+        cross_doc_only = st.checkbox(
+            "Compare across different documents only (Recommended)",
+            value=True,
+            help="When checked, pairs facts originating from different PDF files. When unchecked, also compares sections across different pages of documents."
+        )
+        if st.button("🔍 Analyze Relationships Across Documents", type="primary"):
+            progress_bar = st.progress(0.0)
+            status_text = st.empty()
+
+            status_text.text(f"Scanning {len(all_facts)} facts for candidate pairs...")
+            candidate_pairs = Normalizer.find_candidate_pairs(
+                all_facts,
+                max_candidates=150,
+                prefer_cross_document=cross_doc_only
+            )
+
+            if not candidate_pairs:
+                status_text.empty()
+                progress_bar.empty()
+                st.warning(
+                    f"Analyzed {len(all_facts)} facts across {len(docs)} documents. "
+                    "No candidate pairs met the topical relevance threshold. "
+                    "(Ensure uploaded documents discuss common entities or industry topics)."
+                )
+            else:
+                status_text.text(f"Evaluating {len(candidate_pairs)} candidate pair(s)...")
+
+                def update_progress(curr, total):
+                    progress_bar.progress(curr / total)
+                    status_text.text(f"Evaluating pair {curr}/{total}...")
+
+                confirmed_relationships = relationship_engine.evaluate_relationships(
+                    candidate_pairs,
+                    progress_callback=update_progress
+                )
+
+                saved_count = 0
+                for rel in confirmed_relationships:
+                    db.save_relationship(rel)
+                    saved_count += 1
+
+                status_text.empty()
+                progress_bar.empty()
+                st.success(
+                    f"Analysis complete! Discovered {saved_count} cross-document relationship(s) from {len(candidate_pairs)} candidate pair(s)."
+                )
+                st.rerun()
+
+        with btn_col2:
+            if st.button("🗑️ Clear Relationships"):
+                db.clear_relationships()
+                st.warning("Relationships cleared.")
+                st.rerun()
+
+    # Display Recorded Relationships
+    detailed_rels = db.get_detailed_relationships()
+
+    if not detailed_rels:
         st.subheader("Discovered Relationships: 0")
-        st.info("Cross-document relationship reasoning will be populated in the next phase.")
-    else:
-        st.dataframe(relationships, use_container_width=True)
+        st.caption("Click 'Analyze Relationships Across Documents' above to run cross-document comparison.")
+        return
+
+    # Metrics Summary
+    total_rel_count = len(detailed_rels)
+    corroborate_count = sum(1 for r in detailed_rels if r["relationship_type"] == "CORROBORATES")
+    contradict_count = sum(1 for r in detailed_rels if r["relationship_type"] == "CONTRADICTS")
+    reconcile_count = sum(1 for r in detailed_rels if r["relationship_type"] == "RECONCILES")
+
+    rm1, rm2, rm3, rm4 = st.columns(4)
+    rm1.metric("Total Relationships", total_rel_count)
+    rm2.metric("Corroborates", corroborate_count)
+    rm3.metric("Contradicts", contradict_count)
+    rm4.metric("Reconciles", reconcile_count)
+
+    st.divider()
+
+    # Filter Controls
+    rf_col1, rf_col2 = st.columns([2, 3])
+    with rf_col1:
+        rel_type_filter = st.selectbox(
+            "Filter by Relationship Type:",
+            ["All", "CORROBORATES", "CONTRADICTS", "RECONCILES"]
+        )
+    with rf_col2:
+        rel_search = st.text_input("🔍 Search relationships (subject, value, reasoning):", "")
+
+    # Apply Filters
+    filtered_rels = []
+    for r in detailed_rels:
+        if rel_type_filter != "All" and r["relationship_type"] != rel_type_filter:
+            continue
+        if rel_search:
+            q = rel_search.lower()
+            text_corpus = f"{r['fact_a_subject']} {r['fact_b_subject']} {r['fact_a_value']} {r['fact_b_value']} {r['reasoning']}".lower()
+            if q not in text_corpus:
+                continue
+        filtered_rels.append(r)
+
+    st.write(f"Showing **{len(filtered_rels)}** of **{len(detailed_rels)}** relationships:")
+
+    # Render Side-by-Side Comparison Cards
+    for rel in filtered_rels:
+        rel_type = rel["relationship_type"]
+
+        # Color-coded badge
+        if rel_type == "CORROBORATES":
+            type_badge = "🟢 **CORROBORATES**"
+        elif rel_type == "CONTRADICTS":
+            type_badge = "🔴 **CONTRADICTS**"
+        else:
+            type_badge = "🟠 **RECONCILES**"
+
+        with st.container(border=True):
+            # Header Row
+            hdr_col1, hdr_col2, hdr_col3 = st.columns([3, 2, 3])
+            hdr_col1.markdown(f"### {type_badge}")
+            conf_pct = int(rel.get("confidence", 1.0) * 100)
+            hdr_col2.markdown(f"🎯 **Confidence: {conf_pct}%**")
+            if rel.get("reconciliation_context"):
+                hdr_col3.info(f"Context: {rel['reconciliation_context']}")
+
+            st.divider()
+
+            # Side-by-Side Comparison Columns
+            fact_col_a, fact_col_b = st.columns(2)
+
+            # Fact A
+            with fact_col_a:
+                st.markdown(f"#### 📄 Fact A (ID #{rel['fact_a_id']})")
+                st.caption(f"**Document**: `{rel['fact_a_document']}` | **Page**: {rel['fact_a_page']}")
+                st.markdown(f"**Subject:** {rel['fact_a_subject']}")
+                st.markdown(f"**Predicate:** *{rel['fact_a_predicate']}*")
+                st.markdown(f"**Value:** `{rel['fact_a_value']}`")
+
+                tags_a = []
+                if rel.get("fact_a_unit"):
+                    tags_a.append(f"Unit: {rel['fact_a_unit']}")
+                if rel.get("fact_a_time"):
+                    tags_a.append(f"Time: {rel['fact_a_time']}")
+                if rel.get("fact_a_context"):
+                    tags_a.append(f"Scope: {rel['fact_a_context']}")
+                if tags_a:
+                    st.caption(" | ".join(tags_a))
+
+                st.markdown(f"> ❝ *{rel['fact_a_evidence']}* ❞")
+
+            # Fact B
+            with fact_col_b:
+                st.markdown(f"#### 📄 Fact B (ID #{rel['fact_b_id']})")
+                st.caption(f"**Document**: `{rel['fact_b_document']}` | **Page**: {rel['fact_b_page']}")
+                st.markdown(f"**Subject:** {rel['fact_b_subject']}")
+                st.markdown(f"**Predicate:** *{rel['fact_b_predicate']}*")
+                st.markdown(f"**Value:** `{rel['fact_b_value']}`")
+
+                tags_b = []
+                if rel.get("fact_b_unit"):
+                    tags_b.append(f"Unit: {rel['fact_b_unit']}")
+                if rel.get("fact_b_time"):
+                    tags_b.append(f"Time: {rel['fact_b_time']}")
+                if rel.get("fact_b_context"):
+                    tags_b.append(f"Scope: {rel['fact_b_context']}")
+                if tags_b:
+                    st.caption(" | ".join(tags_b))
+
+                st.markdown(f"> ❝ *{rel['fact_b_evidence']}* ❞")
+
+            st.divider()
+
+            # Reasoning Explanation
+            st.markdown(f"💡 **Reasoning:** {rel['reasoning']}")
 
 
 def render_database_tab():
@@ -427,7 +593,7 @@ def render_database_tab():
     with tab_docs:
         docs = db.get_documents()
         if docs:
-            st.dataframe(docs, use_container_width=True)
+            st.dataframe(docs, width="stretch")
         else:
             st.info("No documents in database.")
 
@@ -441,14 +607,14 @@ def render_database_tab():
             )
             doc_id = next(d["id"] for d in docs if d["filename"] == selected_doc)
             pages = db.get_pages_for_document(doc_id)
-            st.dataframe(pages, use_container_width=True)
+            st.dataframe(pages, width="stretch")
         else:
             st.info("No pages in database.")
 
     with tab_facts:
         facts = db.get_facts()
         if facts:
-            st.dataframe(facts, use_container_width=True)
+            st.dataframe(facts, width="stretch")
         else:
             st.info("No facts in database.")
 

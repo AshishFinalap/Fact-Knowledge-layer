@@ -23,14 +23,16 @@ class FactType(str, Enum):
 
 class RelationshipType(str, Enum):
     """
-    Cross-document relationship types defined for the assignment:
+    Cross-document relationship types:
     - CORROBORATES: Same fact expressed differently across documents.
     - CONTRADICTS: Same subject/predicate/context but with conflicting values.
     - RECONCILES: Facts appear contradictory but can be explained by context (e.g. time period, scope, units).
+    - NO_RELATION: Facts are not sufficiently related or discuss different topics.
     """
     CORROBORATES = "CORROBORATES"
     CONTRADICTS = "CONTRADICTS"
     RECONCILES = "RECONCILES"
+    NO_RELATION = "NO_RELATION"
 
 
 class Evidence(BaseModel):
@@ -154,6 +156,40 @@ class FactRelationship(BaseModel):
         description="For RECONCILES: The specific dimension (e.g., time period, scope, units) that reconciles them."
     )
     confidence: float = Field(default=1.0, ge=0.0, le=1.0, description="Confidence in the relationship assessment.")
+
+    @property
+    def fact_1_id(self) -> int:
+        return self.fact_a_id
+
+    @property
+    def fact_2_id(self) -> int:
+        return self.fact_b_id
+
+    @property
+    def explanation(self) -> str:
+        return self.reasoning
+
+
+class LLMRelationshipEvaluation(BaseModel):
+    """Structured response schema for Gemini fallback relationship reasoning."""
+    relationship_type: RelationshipType = Field(
+        ...,
+        description="Classification: CORROBORATES, CONTRADICTS, RECONCILES, or NO_RELATION."
+    )
+    confidence: float = Field(
+        default=0.85,
+        ge=0.0,
+        le=1.0,
+        description="Confidence score between 0.0 and 1.0."
+    )
+    explanation: str = Field(
+        ...,
+        description="Clear, grounded explanation explaining why this relationship holds."
+    )
+    reconciliation_context: Optional[str] = Field(
+        default=None,
+        description="If RECONCILES, specify the context dimension (e.g. 'Different time periods: FY22 vs FY24')."
+    )
 
 
 class DocumentMetadata(BaseModel):

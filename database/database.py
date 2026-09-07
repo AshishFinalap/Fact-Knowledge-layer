@@ -235,9 +235,18 @@ class Database:
     # --------------------------------------------------------------------------
 
     def save_relationship(self, rel: FactRelationship) -> int:
-        """Store a cross-document relationship between two facts."""
+        """Store a cross-document relationship between two facts (idempotent)."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
+            cursor.execute("""
+                SELECT id FROM relationships 
+                WHERE (fact_a_id = ? AND fact_b_id = ?) 
+                   OR (fact_a_id = ? AND fact_b_id = ?)
+            """, (rel.fact_a_id, rel.fact_b_id, rel.fact_b_id, rel.fact_a_id))
+            existing = cursor.fetchone()
+            if existing:
+                return existing["id"]
+
             cursor.execute("""
                 INSERT INTO relationships (
                     fact_a_id, fact_b_id, relationship_type,
@@ -260,6 +269,90 @@ class Database:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM relationships ORDER BY id ASC")
             return [dict(row) for row in cursor.fetchall()]
+
+    def get_detailed_relationships(self, relationship_type: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        Retrieve all recorded relationships joined with Fact A and Fact B metadata.
+        """
+        query = """
+            SELECT 
+                r.id AS id,
+                r.relationship_type,
+                r.reasoning,
+                r.reconciliation_context,
+                r.confidence,
+                fa.id AS fact_a_id,
+                fa.document_name AS fact_a_document,
+                fa.page_number AS fact_a_page,
+                fa.subject AS fact_a_subject,
+                fa.predicate AS fact_a_predicate,
+                fa.object_value AS fact_a_value,
+                fa.unit AS fact_a_unit,
+                fa.time_period AS fact_a_time,
+                fa.context AS fact_a_context,
+                fa.evidence_quote AS fact_a_evidence,
+                fb.id AS fact_b_id,
+                fb.document_name AS fact_b_document,
+                fb.page_number AS fact_b_page,
+                fb.subject AS fact_b_subject,
+                fb.predicate AS fact_b_predicate,
+                fb.object_value AS fact_b_value,
+                fb.unit AS fact_b_unit,
+                fb.time_period AS fact_b_time,
+                fb.context AS fact_b_context,
+                fb.evidence_quote AS fact_b_evidence
+            FROM relationships r
+            JOIN facts fa ON r.fact_a_id = fa.id
+            JOIN facts fb ON r.fact_b_id = fb.id
+        """
+        params = []
+        if relationship_type and relationship_type != "All":
+            query += " WHERE r.relationship_type = ?"
+            params.append(relationship_type)
+
+        query += " ORDER BY r.id DESC"
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(query, params)
+            return [dict(row) for row in cursor.fetchall()]
+
+    def clear_relationships(self) -> None:
+        """Clear only the relationships table."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM relationships")
+            conn.commit()
+
+    def get_fact_models(self, document_id: Optional[int] = None) -> List[Fact]:
+        """Retrieve facts as Pydantic Fact domain models."""
+        from models.schemas import Evidence
+        raw_facts = self.get_facts(document_id=document_id)
+        fact_models = []
+        for r in raw_facts:
+            f = Fact(
+                id=r["id"],
+                document_id=r["document_id"],
+                document_name=r["document_name"],
+                page_number=r["page_number"],
+                subject=r["subject"],
+                predicate=r["predicate"],
+                object_value=r["object_value"],
+                fact_type=r["fact_type"],
+                numeric_value=r["numeric_value"],
+                unit=r["unit"],
+                time_period=r["time_period"],
+                context=r["context"],
+                confidence=r["confidence"],
+                evidence=Evidence(
+                    document_name=r["document_name"],
+                    page_number=r["page_number"],
+                    quote=r["evidence_quote"],
+                    context_snippet=r["evidence_context"]
+                )
+            )
+            fact_models.append(f)
+        return fact_models
 
     # --------------------------------------------------------------------------
     # Utility Operations
