@@ -17,7 +17,7 @@ Important facts are often scattered across disparate documents—stated in diffe
 ---
 
 ## 🏗️ Architecture & Project Structure
-
+![[Pasted image 20260909004652.png]]
 ```text
 fact-knowledge-layer/
 ├── app.py                     # Streamlit frontend & UI controller
