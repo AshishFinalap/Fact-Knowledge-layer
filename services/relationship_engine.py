@@ -76,6 +76,14 @@ class RelationshipEngine:
         load_dotenv(project_root / ".env")
 
         self.api_key = api_key or os.getenv("GEMINI_API_KEY", "").strip()
+        if not self.api_key or self.api_key == "your_gemini_api_key_here":
+            try:
+                import streamlit as st
+                if hasattr(st, "secrets") and "GEMINI_API_KEY" in st.secrets:
+                    self.api_key = str(st.secrets["GEMINI_API_KEY"]).strip()
+            except Exception:
+                pass
+
         self.model_name = model_name or self.CANDIDATE_MODELS[0]
         self._client = None
 
