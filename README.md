@@ -156,7 +156,7 @@ The downstream LLM reasoning engine is designed around the four core cases requi
 
 Add a hosted recording of the complete workflow here:
 
-**[Watch the PDF processing demo](https://youtu.be/REPLACE_WITH_DEMO_VIDEO_ID)**
+https://drive.google.com/drive/folders/1oh58N44cLgBm01Bj3nJiglRnpqwjFTeB?usp=sharing
 
 The recording should be three minutes or less and show PDF upload, page-level extraction and provenance, fact extraction, and the `CORROBORATES`, `CONTRADICTS`, and `RECONCILES` relationship cases, including a failure/edge case.
 
