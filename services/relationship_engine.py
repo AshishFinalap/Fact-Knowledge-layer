@@ -79,17 +79,21 @@ class RelationshipEngine:
         self.model_name = model_name or self.CANDIDATE_MODELS[0]
         self._client = None
 
-        if self.api_key and self.api_key != "your_gemini_api_key_here":
+    @property
+    def client(self):
+        """Lazy-loaded Gemini client."""
+        if self._client is None and self.api_key and self.api_key != "your_gemini_api_key_here":
             try:
                 from google import genai
                 self._client = genai.Client(api_key=self.api_key)
             except Exception as exc:
                 logger.warning("Gemini client initialization error in RelationshipEngine: %s", type(exc).__name__)
+        return self._client
 
     @property
     def is_llm_available(self) -> bool:
         """Returns True if the Gemini fallback client is ready."""
-        return self._client is not None
+        return self.client is not None
 
     def _are_values_equivalent(self, na: NormalizedFact, nb: NormalizedFact) -> bool:
         """Determines if two normalized facts assert equivalent values, accounting for unit scaling."""
@@ -125,7 +129,7 @@ class RelationshipEngine:
         # Only compare facts if normalized subjects represent the exact same metric/entity.
         # Reject immediately if subjects differ (e.g. Other expenses != Total expenses).
         # ----------------------------------------------------------------------
-        if not Normalizer.are_subjects_compatible(na.canonical_subject, nb.canonical_subject):
+        if not Normalizer.are_subjects_compatible(na.norm_subject, nb.norm_subject):
             return None
 
         # ----------------------------------------------------------------------
@@ -261,7 +265,7 @@ class RelationshipEngine:
 
         for model_name in self.CANDIDATE_MODELS:
             try:
-                response = self._client.models.generate_content(
+                response = self.client.models.generate_content(
                     model=model_name,
                     contents=prompt,
                     config=config
@@ -306,7 +310,7 @@ class RelationshipEngine:
         # STEP 1: STRICT SUBJECT REJECTION FIRST
         # If subjects represent different metrics/entities (e.g. Other expenses vs Total expenses),
         # immediately reject without establishing any relationship.
-        if not Normalizer.are_subjects_compatible(na.canonical_subject, nb.canonical_subject):
+        if not Normalizer.are_subjects_compatible(na.norm_subject, nb.norm_subject):
             return None
 
         # 1. Deterministic evaluation (fast, high-confidence, zero cost)

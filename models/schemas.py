@@ -106,13 +106,15 @@ class ExtractedFactItem(BaseModel):
     scope_context: Optional[str] = Field(default=None, description="Scope, boundary, or qualifiers (e.g. 'Consolidated', 'US operations').")
     evidence_quote: str = Field(..., description="Exact verbatim text span from the page supporting this fact.")
     confidence: float = Field(default=1.0, ge=0.0, le=1.0, description="Confidence score between 0.0 and 1.0.")
+    page_number: Optional[int] = Field(default=None, description="1-indexed page number where this fact appears in the document.")
 
     def to_fact(self, document_name: str, page_number: int, document_id: Optional[int] = None) -> "Fact":
         """Converts extracted item into the persistent Fact domain model."""
+        target_page = self.page_number if self.page_number is not None and self.page_number > 0 else page_number
         return Fact(
             document_id=document_id,
             document_name=document_name,
-            page_number=page_number,
+            page_number=target_page,
             subject=self.subject.strip(),
             predicate=self.predicate.strip(),
             object_value=self.value.strip(),
@@ -124,7 +126,7 @@ class ExtractedFactItem(BaseModel):
             confidence=float(self.confidence),
             evidence=Evidence(
                 document_name=document_name,
-                page_number=page_number,
+                page_number=target_page,
                 quote=self.evidence_quote.strip(),
                 context_snippet=self.scope_context.strip() if self.scope_context else None,
             )
