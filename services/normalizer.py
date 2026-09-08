@@ -42,6 +42,24 @@ GENERIC_ENTITY_TOKENS = {
     "inc", "incorporated", "llc", "co", "company", "holdings", "holding"
 }
 
+# Essential financial metric qualifiers that differentiate line items.
+# CRITICAL: These must NEVER be stripped, ignored, or conflated.
+FINANCIAL_QUALIFIERS = {
+    "total", "other", "net", "gross", "operating", "adjusted", "basic", "diluted", "non-operating"
+}
+
+# Sets of qualifiers that are strictly mutually exclusive in financial reporting.
+# If Fact A and Fact B contain qualifiers from opposing sides of these sets,
+# they MUST be rejected immediately as NO_RELATION.
+MUTUALLY_EXCLUSIVE_QUALIFIERS = [
+    {"total", "other"},
+    {"net", "gross"},
+    {"operating", "net"},
+    {"operating", "other"},
+    {"operating", "non-operating"},
+    {"basic", "diluted"},
+]
+
 # Broad category words that must NEVER be used on their own to match different metrics
 BROAD_CATEGORY_KEYWORDS = {
     "expense", "expenses", "revenue", "revenues", "cost", "costs",
@@ -56,6 +74,9 @@ CANONICAL_SUBJECT_ALIASES = {
     "revenues from contracts with customers": "revenue from operations",
     "revenue from customer contracts": "revenue from operations",
     "revenue from contract with customers": "revenue from operations",
+    "operating revenue": "revenue from operations",
+    "operating revenues": "revenue from operations",
+    "revenue from operation": "revenue from operations",
     "sales revenue": "revenue from operations",
     "total revenue from operations": "revenue from operations",
     "net sales": "revenue from operations",
@@ -64,6 +85,13 @@ CANONICAL_SUBJECT_ALIASES = {
     "ebitda": "ebitda",
     "net profit": "net profit",
     "net income": "net profit",
+    "gross profit": "gross profit",
+    "gross margin": "gross profit",
+    "operating profit": "operating profit",
+    "operating income": "operating profit",
+    "ebit": "operating profit",
+    "other expense": "other expenses",
+    "total expense": "total expenses",
     "diluted earnings per share": "earnings per share",
     "basic earnings per share": "earnings per share",
     "eps": "earnings per share",
@@ -247,20 +275,141 @@ class Normalizer:
         return cleaned
 
     @classmethod
+    def extract_qualifiers(cls, text: Optional[str]) -> Set[str]:
+        """Extract active financial qualifiers (e.g. 'total', 'other', 'net', 'gross', 'operating', 'adjusted')."""
+        if not text:
+            return set()
+        clean = cls.clean_text(text)
+        tokens = set(clean.split())
+        return tokens.intersection(FINANCIAL_QUALIFIERS)
+
+    @classmethod
+    def are_qualifiers_compatible(cls, subj_a: Optional[str], subj_b: Optional[str]) -> bool:
+        """
+        Enforce strict financial qualifier compatibility.
+        - 'Other expenses' != 'Total expenses'
+        - 'Net revenue' != 'Gross revenue'
+        - 'Operating profit' != 'Net profit'
+        - 'Basic EPS' != 'Diluted EPS'
+        If two subjects contain mutually exclusive qualifiers, or if one contains 'other'
+        while the other does not (e.g. 'Other expenses' vs 'Total expenses' / 'Expenses'),
+        reject immediately as False.
+        """
+        quals_a = cls.extract_qualifiers(subj_a)
+        quals_b = cls.extract_qualifiers(subj_b)
+
+        # 1. Check mutually exclusive qualifier pairs
+        combined = quals_a.union(quals_b)
+        for conflict_set in MUTUALLY_EXCLUSIVE_QUALIFIERS:
+            if conflict_set.issubset(combined):
+                # Ensure the conflict isn't internal to a single term (e.g., if one term had both)
+                has_a = bool(quals_a.intersection(conflict_set))
+                has_b = bool(quals_b.intersection(conflict_set))
+                if has_a and has_b and quals_a.intersection(conflict_set) != quals_b.intersection(conflict_set):
+                    return False
+
+        # 2. Asymmetric 'other' check: 'other expenses' is a specific sub-item, never equivalent to general or total items
+        if ("other" in quals_a and "other" not in quals_b) or ("other" in quals_b and "other" not in quals_a):
+            clean_a = cls.clean_text(subj_a)
+            clean_b = cls.clean_text(subj_b)
+            if any(kw in clean_a or kw in clean_b for kw in BROAD_CATEGORY_KEYWORDS):
+                return False
+
+        # 3. Asymmetric 'total' check when paired with non-total specific qualifiers
+        if ("total" in quals_a and "total" not in quals_b) or ("total" in quals_b and "total" not in quals_a):
+            non_total_quals = {"operating", "net", "other", "gross"}
+            if quals_a.intersection(non_total_quals) or quals_b.intersection(non_total_quals):
+                if quals_a != quals_b:
+                    return False
+
+        return True
+
+    @classmethod
+    def compute_metric_similarity(cls, subj_a: Optional[str], subj_b: Optional[str]) -> float:
+        """
+        Lightweight local semantic similarity between two metric subjects.
+        - Returns 0.0 immediately if financial qualifiers conflict.
+        - Evaluates token Jaccard similarity, sequence ratio, and canonical alias equivalence.
+        - Pure standard library: does NOT require external cloud infrastructure or heavy vector stores.
+        """
+        if not subj_a or not subj_b:
+            return 0.0
+
+        # Strict qualifier barrier: if qualifiers conflict, similarity is 0.0
+        if not cls.are_qualifiers_compatible(subj_a, subj_b):
+            return 0.0
+
+        canon_a = cls.canonicalize_subject(subj_a)
+        canon_b = cls.canonicalize_subject(subj_b)
+
+        if canon_a == canon_b:
+            return 1.0
+
+        toks_a = cls.extract_tokens(canon_a)
+        toks_b = cls.extract_tokens(canon_b)
+
+        if not toks_a or not toks_b:
+            return 0.0
+
+        # Disjoint broad category rejection (e.g. employee count vs revenue, or expense vs profit)
+        cats_a = toks_a.intersection(BROAD_CATEGORY_KEYWORDS)
+        cats_b = toks_b.intersection(BROAD_CATEGORY_KEYWORDS)
+        if cats_a and cats_b and cats_a != cats_b:
+            return 0.0
+        if bool(cats_a) != bool(cats_b) and not toks_a.intersection(toks_b):
+            return 0.0
+
+        # Jaccard Token Overlap
+        intersection = toks_a.intersection(toks_b)
+        union = toks_a.union(toks_b)
+        jaccard = len(intersection) / len(union) if union else 0.0
+
+        # Difflib sequence similarity on canonical strings
+        import difflib
+        seq_ratio = difflib.SequenceMatcher(None, canon_a, canon_b).ratio()
+
+        return round(0.6 * jaccard + 0.4 * seq_ratio, 3)
+
+    @classmethod
     def are_subjects_compatible(cls, subj_a: Optional[str], subj_b: Optional[str]) -> bool:
         """
         Strict subject matching check.
         Returns True IF AND ONLY IF canonical subjects represent the exact same entity or metric.
-        Explicitly rejects matching based on broad category keywords alone.
+        - Enforces qualifier compatibility (e.g. Other expenses != Total expenses).
+        - Checks canonical alias equivalence (e.g. 'Revenue from operations' == 'Operating revenue').
+        - Evaluates semantic similarity with identical root category.
+        - Explicitly rejects matching based on broad category keywords alone.
         """
+        if not subj_a or not subj_b:
+            return False
+
+        # 1. HARD QUALIFIER BARRIER FIRST
+        if not cls.are_qualifiers_compatible(subj_a, subj_b):
+            return False
+
         canon_a = cls.canonicalize_subject(subj_a)
         canon_b = cls.canonicalize_subject(subj_b)
 
         if not canon_a or not canon_b:
             return False
 
-        # Identical canonical subject or exact alias match
+        # 2. Identical canonical subject or exact alias match
         if canon_a == canon_b:
+            return True
+
+        # 3. Disjoint category rejection
+        toks_a = cls.extract_tokens(canon_a)
+        toks_b = cls.extract_tokens(canon_b)
+        cats_a = toks_a.intersection(BROAD_CATEGORY_KEYWORDS)
+        cats_b = toks_b.intersection(BROAD_CATEGORY_KEYWORDS)
+        if cats_a and cats_b and cats_a != cats_b:
+            return False
+        if bool(cats_a) != bool(cats_b) and not toks_a.intersection(toks_b):
+            return False
+
+        # 4. Semantic similarity threshold with compatible heads
+        sim = cls.compute_metric_similarity(subj_a, subj_b)
+        if sim >= 0.82:
             return True
 
         return False
@@ -569,16 +718,31 @@ class Normalizer:
     def find_candidate_pairs(
         cls,
         facts: List[Fact],
-        max_candidates: int = 150,
+        max_candidates: int = 250,
+        top_k_per_fact: int = 5,
         prefer_cross_document: bool = True
     ) -> List[Tuple[NormalizedFact, NormalizedFact]]:
         """
         Identify high-confidence candidate fact pairs for comparison.
 
-        STRICT SUBJECT MATCHING:
-        - Groups facts strictly by canonical subject or verified alias.
-        - Never pairs facts based on broad category words (e.g. 'expense', 'cost', 'revenue') alone.
-        - Filters out incompatible predicates upfront.
+        CANDIDATE GENERATION PIPELINE:
+        All Facts
+           ↓
+        Metric Canonicalization
+           ↓
+        Strict Metric Compatibility Filter (Hard Financial Qualifier Barrier)
+           ↓
+        Semantic Similarity (Lightweight & Local)
+           ↓
+        Top-K Relevant Candidates
+           ↓
+        Relationship Engine
+
+        Guarantees:
+        - Never compares every fact against every other fact (no brute force).
+        - Distinct financial qualifiers ('Other expenses' vs 'Total expenses') are rejected upfront.
+        - Cross-document boundary is respected when prefer_cross_document is True.
+        - Predicates must be compatible.
         """
         if len(facts) < 2:
             return []
@@ -586,7 +750,7 @@ class Normalizer:
         # 1. Normalize all facts
         normalized_facts = [cls.normalize_fact(f) for f in facts]
 
-        # 2. Group facts strictly by canonical subject
+        # 2. Metric Canonicalization: Group facts into canonical metric buckets
         subject_to_facts: Dict[str, List[NormalizedFact]] = {}
         for n_fact in normalized_facts:
             subj = n_fact.canonical_subject
@@ -594,32 +758,97 @@ class Normalizer:
                 continue
             subject_to_facts.setdefault(subj, []).append(n_fact)
 
-        # 3. Form candidate pairs within matching canonical subject groups
-        candidate_pairs: List[Tuple[NormalizedFact, NormalizedFact]] = []
-        seen_pairs = set()
+        # 3. Strict Metric Compatibility: Find compatible bucket clusters via inverted token index
+        all_canonical_keys = list(subject_to_facts.keys())
+        compatible_key_pairs: Set[Tuple[str, str]] = set()
 
-        for subj, group in subject_to_facts.items():
-            for i in range(len(group)):
-                for j in range(i + 1, len(group)):
-                    fa = group[i]
-                    fb = group[j]
+        # Each canonical bucket is self-compatible
+        for key in all_canonical_keys:
+            compatible_key_pairs.add((key, key))
 
-                    # Enforce document boundary if prefer_cross_document is requested
+        # Index keys by meaningful tokens to avoid quadratic all-pairs comparisons
+        token_to_keys: Dict[str, List[str]] = {}
+        for key in all_canonical_keys:
+            toks = cls.extract_tokens(key)
+            for t in toks:
+                token_to_keys.setdefault(t, []).append(key)
+
+        evaluated_pairs: Set[Tuple[str, str]] = set()
+        for token, keys_with_token in token_to_keys.items():
+            if len(keys_with_token) > 1:
+                for i in range(len(keys_with_token)):
+                    k_a = keys_with_token[i]
+                    for j in range(i + 1, len(keys_with_token)):
+                        k_b = keys_with_token[j]
+                        pair_id = (min(k_a, k_b), max(k_a, k_b))
+                        if pair_id in evaluated_pairs:
+                            continue
+                        evaluated_pairs.add(pair_id)
+
+                        if cls.are_subjects_compatible(k_a, k_b):
+                            compatible_key_pairs.add((k_a, k_b))
+                            compatible_key_pairs.add((k_b, k_a))
+
+        # 4. Semantic Similarity & Candidate Pair Generation
+        # Map fact_id -> list of candidate tuples (score, NormalizedFact, NormalizedFact)
+        fact_candidates: Dict[int, List[Tuple[float, NormalizedFact, NormalizedFact]]] = {}
+        seen_pairs: Set[Tuple[int, int]] = set()
+
+        for (key_a, key_b) in compatible_key_pairs:
+            group_a = subject_to_facts[key_a]
+            group_b = subject_to_facts[key_b]
+
+            is_same_group = (key_a == key_b)
+
+            for i in range(len(group_a)):
+                fa = group_a[i]
+                start_j = (i + 1) if is_same_group else 0
+
+                for j in range(start_j, len(group_b)):
+                    fb = group_b[j]
+
+                    if fa.fact_id == fb.fact_id:
+                        continue
+
+                    # Cross-document boundary enforcement
                     if prefer_cross_document and fa.document_name == fb.document_name:
                         continue
 
                     # Filter incompatible predicates upfront
-                    if not cls.are_predicates_compatible(fa.norm_predicate, fb.norm_predicate, subj_canonical=subj):
+                    if not cls.are_predicates_compatible(fa.norm_predicate, fb.norm_predicate, subj_canonical=fa.canonical_subject):
                         continue
 
-                    # Prevent duplicate pairs
+                    # Filter incompatible units upfront (e.g. INR vs USD, or INR vs PERCENT)
+                    if fa.base_unit and fb.base_unit and fa.base_unit != fb.base_unit:
+                        continue
+
                     pair_key = (min(fa.fact_id, fb.fact_id), max(fa.fact_id, fb.fact_id))
                     if pair_key in seen_pairs:
                         continue
                     seen_pairs.add(pair_key)
 
-                    candidate_pairs.append((fa, fb))
-                    if len(candidate_pairs) >= max_candidates:
-                        return candidate_pairs
+                    # Compute similarity score
+                    sim_score = cls.compute_metric_similarity(fa.norm_subject, fb.norm_subject)
 
-        return candidate_pairs
+                    # Boost score if values are equivalent
+                    if fa.base_numeric_value is not None and fb.base_numeric_value is not None:
+                        if cls.are_numeric_values_equivalent(fa.numeric_value, fa.norm_unit, fb.numeric_value, fb.norm_unit):
+                            sim_score += 0.3
+
+                    fact_candidates.setdefault(fa.fact_id, []).append((sim_score, fa, fb))
+                    fact_candidates.setdefault(fb.fact_id, []).append((sim_score, fb, fa))
+
+        # 5. Top-K Relevant Candidates Selection
+        scored_pairs: Dict[Tuple[int, int], Tuple[float, NormalizedFact, NormalizedFact]] = {}
+
+        for fid, candidates in fact_candidates.items():
+            # Sort candidates by similarity score descending
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            for score, fa, fb in candidates[:top_k_per_fact]:
+                pair_key = (min(fa.fact_id, fb.fact_id), max(fa.fact_id, fb.fact_id))
+                if pair_key not in scored_pairs or score > scored_pairs[pair_key][0]:
+                    scored_pairs[pair_key] = (score, fa, fb)
+
+        # Sort all selected candidate pairs by score descending and truncate to max_candidates
+        sorted_candidates = sorted(scored_pairs.values(), key=lambda x: x[0], reverse=True)
+        return [(fa, fb) for _, fa, fb in sorted_candidates[:max_candidates]]
