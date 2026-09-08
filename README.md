@@ -4,6 +4,9 @@
 > A system to extract meaningful facts from PDFs, link them to exact source evidence (document + page), and discover cross-document relationships (`CORROBORATES`, `CONTRADICTS`, `RECONCILES`).
 
 ---
+FULL VIDEO EXPLANATION-
+https://drive.google.com/drive/folders/1oh58N44cLgBm01Bj3nJiglRnpqwjFTeB?usp=sharing
+
 Deploy Link-
 https://fact-knowledge-layer-k3aduymuhfkcpnpjevsmyq.streamlit.app/
 
